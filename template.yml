@@ -1,0 +1,211 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS CloudFormation Template to run the LaunchDarkly Relay with Fargate'
+
+Parameters:
+  Stage:
+    Description: name of stage, e.g. dev, test, staging, prod
+    Type: String
+    Default: dev 
+  ApiKey:
+    Description: LaunchDarkly SDK key
+    Type: String
+    MinLength: 36 # should be sdk-{36 chars}
+
+Resources:
+  DynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: namespace
+          AttributeType: S
+        - AttributeName: key
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: namespace
+          KeyType: HASH
+        - AttributeName: key
+          KeyType: RANGE
+      TableName: !Join ['-', [LaunchDarklyCache, Ref: Stage]]
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Join ['-', [ld-relay, !Ref Stage]]
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: ecs-tasks.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RootPolicy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:*Item
+                Resource: !GetAtt 'DynamoDBTable.Arn'
+
+  # the role ECS uses to start tasks
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: ecs-tasks.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns: # use the managed policy (mirrors what the console does)
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      TaskRoleArn: !GetAtt 'TaskRole.Arn'
+      ExecutionRoleArn: !GetAtt 'TaskExecutionRole.Arn'
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      Family: !Ref AWS::StackName
+      Cpu: '512'
+      Memory: '1024'
+      ContainerDefinitions:
+        - Name: ld-relay
+          Image: launchdarkly/ld-relay:v5
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          PortMappings:
+            - HostPort: 8030
+              Protocol: tcp
+              ContainerPort: 8030
+          Cpu: 512
+          MemoryReservation: 1024
+          Environment:
+            - Name: DYNAMODB_TABLE
+              Value: !Ref DynamoDBTable
+            - Name: EXIT_ON_ERROR
+              Value: 'true'
+            - Name: USE_DYNAMODB
+              Value: 'true'
+            - Name: LD_ENV_production
+              Value: !Ref ApiKey
+  
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['', ['/ecs/ld-relay-', !Ref Stage]]
+      RetentionInDays: 7
+
+  Service:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !GetAtt 'Cluster.Arn'
+      DesiredCount: 1 # should only need one instance of the relay at a time
+      LaunchType: FARGATE
+      TaskDefinition: !Ref TaskDefinition
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref ServiceSecurityGroup
+          Subnets:
+            - !Ref SubnetAz
+
+  ServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security group for the LaunchDarkly Relay'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8030
+          ToPort: 8030
+          CidrIp: 0.0.0.0/0
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/24
+      EnableDnsSupport: 'true'
+      EnableDnsHostnames: 'true'
+      Tags:
+        - Key: Name
+          Value: !Join [' ', [ECS, !Ref Cluster, '-', VPC]]
+        - Key: Description
+          Value: Created for LaunchDarkly Relay cluster
+
+  SubnetAz:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.0.0/24      
+      Tags:
+        - Key: Name
+          Value: !Join [' ', [ECS, !Ref Cluster, '-', Subnet]]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join [' ', [ECS, !Ref Cluster, '-', InternetGateway]]
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  RouteViaIgw:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Join [' ', [ECS, !Ref Cluster, '-', RouteTable]]
+
+  PublicRouteViaIgw:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref RouteViaIgw
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetAz
+      RouteTableId: !Ref RouteViaIgw
+
+Outputs:
+  TableName:
+    Description: 'DynamoDB table.'
+    Value: !Ref DynamoDBTable
+
+  Cluster:
+    Description: 'Fargate cluster.'
+    Value: !Ref Cluster
+
+  TaskRole:
+    Description: 'Task role (used by the relay).'
+    Value: !Ref TaskRole
+
+  TaskExecutionRole:
+    Description: 'Task execution role (used by ECS).'
+    Value: !Ref TaskExecutionRole

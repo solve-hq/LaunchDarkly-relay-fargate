@@ -1,0 +1,30 @@
+service: launchdarkly-relay-test
+
+plugins:
+  - serverless-pseudo-parameters
+
+custom:
+  tableName: PUT_YOUR_DYNAMODB_TABLE_NAME_HERE
+  ldApiKey: PUT_YOUR_LAUNCHDARKLY_SDK_KEY_HERE
+
+provider:
+  name: aws
+  runtime: nodejs8.10
+  region: eu-west-2
+  iamRoleStatements:
+    - Effect: Allow
+      Action: 
+        - dynamodb:Query
+        - dynamodb:*Item
+      Resource: arn:aws:dynamodb:#{AWS::Region}:#{AWS::AccountId}:table/${self:custom.tableName}
+
+functions:
+  hello:
+    handler: handler.hello
+    environment:
+      DYNAMODB_TABLE: ${self:custom.tableName}
+      LAUNCHDARKLY_APIKEY: ${self:custom.ldApiKey}
+    events:
+      - http:
+          path: /
+          method: get

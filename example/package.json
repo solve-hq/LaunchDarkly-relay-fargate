@@ -1,0 +1,16 @@
+{
+  "name": "example",
+  "version": "1.0.0",
+  "description": "",
+  "main": "handler.js",
+  "dependencies": {
+    "ldclient-node": "^5.7.4",
+    "ldclient-node-dynamodb-store": "^1.1.4",
+    "serverless-pseudo-parameters": "^2.4.0"
+  },
+  "devDependencies": {},
+  "scripts": {},
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
