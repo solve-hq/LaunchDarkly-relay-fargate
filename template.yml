@@ -1,19 +1,26 @@
 ---
-AWSTemplateFormatVersion: '2010-09-09'
-Description: 'AWS CloudFormation Template to run the LaunchDarkly Relay with Fargate'
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "AWS CloudFormation Template to run the LaunchDarkly Relay with Fargate"
 
 Parameters:
   Stage:
     Description: name of stage, e.g. dev, test, staging, prod
     Type: String
-    Default: dev 
+    Default: dev
   ApiKey:
     Description: LaunchDarkly SDK key
     Type: String
     MinLength: 36 # should be sdk-{36 chars}
+  TableNameParamNamePrefix:
+    Description: |
+      Prefix the name of the SSM parameter used to store the DynamoDB table name.
+
+      For example, a prefix of "/Foo" will create an SSM param named "/Foo/LaunchDarklyRelay/TableName"
+    Type: String
+    Default: ""
 
 Resources:
-  DynamoDBTable:
+  Table:
     Type: AWS::DynamoDB::Table
     Properties:
       AttributeDefinitions:
@@ -27,22 +34,28 @@ Resources:
           KeyType: HASH
         - AttributeName: key
           KeyType: RANGE
-      TableName: !Join ['-', [LaunchDarklyCache, Ref: Stage]]
+
+  TableNameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "${TableNameParamNamePrefix}/LaunchDarklyRelay/TableName"
+      Type: String
+      Value: !Ref Table
 
   Cluster:
     Type: AWS::ECS::Cluster
     Properties:
-      ClusterName: !Join ['-', [ld-relay, !Ref Stage]]
+      ClusterName: !Ref AWS::StackName
 
   TaskRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
         Statement:
-        - Effect: Allow
-          Principal:
-            Service: ecs-tasks.amazonaws.com
-          Action: sts:AssumeRole
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
       Policies:
         - PolicyName: RootPolicy
           PolicyDocument:
@@ -51,7 +64,7 @@ Resources:
                 Action:
                   - dynamodb:Query
                   - dynamodb:*Item
-                Resource: !GetAtt 'DynamoDBTable.Arn'
+                Resource: !GetAtt "Table.Arn"
 
   # the role ECS uses to start tasks
   TaskExecutionRole:
@@ -59,24 +72,24 @@ Resources:
     Properties:
       AssumeRolePolicyDocument:
         Statement:
-        - Effect: Allow
-          Principal:
-            Service: ecs-tasks.amazonaws.com
-          Action: sts:AssumeRole
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
       ManagedPolicyArns: # use the managed policy (mirrors what the console does)
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
 
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
-      TaskRoleArn: !GetAtt 'TaskRole.Arn'
-      ExecutionRoleArn: !GetAtt 'TaskExecutionRole.Arn'
+      TaskRoleArn: !GetAtt "TaskRole.Arn"
+      ExecutionRoleArn: !GetAtt "TaskExecutionRole.Arn"
       RequiresCompatibilities:
         - FARGATE
       NetworkMode: awsvpc
       Family: !Ref AWS::StackName
-      Cpu: '512'
-      Memory: '1024'
+      Cpu: "512"
+      Memory: "1024"
       ContainerDefinitions:
         - Name: ld-relay
           Image: launchdarkly/ld-relay:v5
@@ -94,24 +107,24 @@ Resources:
           MemoryReservation: 1024
           Environment:
             - Name: DYNAMODB_TABLE
-              Value: !Ref DynamoDBTable
+              Value: !Ref Table
             - Name: EXIT_ON_ERROR
-              Value: 'true'
+              Value: "true"
             - Name: USE_DYNAMODB
-              Value: 'true'
+              Value: "true"
             - Name: LD_ENV_production
               Value: !Ref ApiKey
-  
+
   LogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Join ['', ['/ecs/ld-relay-', !Ref Stage]]
+      LogGroupName: !Sub "/ecs/${AWS::StackName}"
       RetentionInDays: 7
 
   Service:
     Type: AWS::ECS::Service
     Properties:
-      Cluster: !GetAtt 'Cluster.Arn'
+      Cluster: !GetAtt "Cluster.Arn"
       DesiredCount: 1 # should only need one instance of the relay at a time
       LaunchType: FARGATE
       TaskDefinition: !Ref TaskDefinition
@@ -129,7 +142,7 @@ Resources:
   ServiceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: 'Security group for the LaunchDarkly Relay'
+      GroupDescription: "Security group for the LaunchDarkly Relay"
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -141,11 +154,11 @@ Resources:
     Type: AWS::EC2::VPC
     Properties:
       CidrBlock: 10.0.0.0/24
-      EnableDnsSupport: 'true'
-      EnableDnsHostnames: 'true'
+      EnableDnsSupport: "true"
+      EnableDnsHostnames: "true"
       Tags:
         - Key: Name
-          Value: !Join [' ', [ECS, !Ref Cluster, '-', VPC]]
+          Value: !Join [" ", [ECS, !Ref Cluster, "-", VPC]]
         - Key: Description
           Value: Created for LaunchDarkly Relay cluster
 
@@ -153,17 +166,17 @@ Resources:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: 10.0.0.0/24      
+      CidrBlock: 10.0.0.0/24
       Tags:
         - Key: Name
-          Value: !Join [' ', [ECS, !Ref Cluster, '-', Subnet]]
+          Value: !Join [" ", [ECS, !Ref Cluster, "-", Subnet]]
 
   InternetGateway:
     Type: AWS::EC2::InternetGateway
     Properties:
       Tags:
         - Key: Name
-          Value: !Join [' ', [ECS, !Ref Cluster, '-', InternetGateway]]
+          Value: !Join [" ", [ECS, !Ref Cluster, "-", InternetGateway]]
 
   AttachGateway:
     Type: AWS::EC2::VPCGatewayAttachment
@@ -177,7 +190,7 @@ Resources:
       VpcId: !Ref VPC
       Tags:
         - Key: Name
-          Value: !Join [' ', [ECS, !Ref Cluster, '-', RouteTable]]
+          Value: !Join [" ", [ECS, !Ref Cluster, "-", RouteTable]]
 
   PublicRouteViaIgw:
     Type: AWS::EC2::Route
@@ -195,17 +208,17 @@ Resources:
 
 Outputs:
   TableName:
-    Description: 'DynamoDB table.'
-    Value: !Ref DynamoDBTable
+    Description: "DynamoDB table."
+    Value: !Ref Table
 
   Cluster:
-    Description: 'Fargate cluster.'
+    Description: "Fargate cluster."
     Value: !Ref Cluster
 
   TaskRole:
-    Description: 'Task role (used by the relay).'
+    Description: "Task role (used by the relay)."
     Value: !Ref TaskRole
 
   TaskExecutionRole:
-    Description: 'Task execution role (used by ECS).'
+    Description: "Task execution role (used by ECS)."
     Value: !Ref TaskExecutionRole
